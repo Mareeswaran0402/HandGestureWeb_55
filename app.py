@@ -1,29 +1,22 @@
 from flask import Flask, render_template, request, jsonify
-import cv2
-import mediapipe as mp
+
 import joblib
 import numpy as np
-import base64
 import os
-import threading
 
 
 # =========================================================
-# FLASK APPLICATION
+# FLASK APP
 # =========================================================
 
 app = Flask(__name__)
 
-# Maximum request size: 5 MB
-app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024
-
 
 # =========================================================
-# FILE PATHS
+# FILES
 # =========================================================
 
 MODEL_FILE = "gesture_model.pkl"
-HAND_MODEL_FILE = "hand_landmarker.task"
 
 
 # =========================================================
@@ -48,16 +41,23 @@ GESTURES = [
 # SETTINGS
 # =========================================================
 
-# Minimum confidence for accepting a gesture
+# Minimum confidence required
 CONFIDENCE_THRESHOLD = 55.0
 
-# Minimum difference between top and second prediction
+# Difference between top and second prediction
 MARGIN_THRESHOLD = 8.0
 
 
 # =========================================================
-# LOAD RANDOM FOREST MODEL
+# LOAD MODEL
 # =========================================================
+
+if not os.path.exists(MODEL_FILE):
+
+    raise FileNotFoundError(
+        f"Missing model file: {MODEL_FILE}"
+    )
+
 
 try:
 
@@ -72,25 +72,31 @@ except Exception as e:
     print("ERROR: COULD NOT LOAD MODEL")
     print("=" * 60)
     print()
-    print("File:", MODEL_FILE)
-    print("Error:", e)
+    print(e)
     print()
 
     raise SystemExit(1)
 
 
 # =========================================================
-# DISPLAY MODEL INFORMATION
+# MODEL CLASSES
 # =========================================================
 
+MODEL_CLASSES = [
+    str(class_name)
+    for class_name in model.classes_
+]
+
+
 print()
 print("=" * 60)
-print("GESTURE MODEL LOADED")
+print("        HAND GESTURE WEB APPLICATION")
 print("=" * 60)
 print()
+
 print("Model classes:")
 
-for class_name in model.classes_:
+for class_name in MODEL_CLASSES:
 
     print(
         " -",
@@ -101,133 +107,64 @@ print()
 
 
 # =========================================================
-# CHECK EXPECTED GESTURES
+# CHECK FOR UNKNOWN
 # =========================================================
 
-model_class_names = [
-    str(class_name)
-    for class_name in model.classes_
-]
+if "UNKNOWN" in MODEL_CLASSES:
+
+    print("=" * 60)
+    print("WARNING: UNKNOWN FOUND IN MODEL")
+    print("=" * 60)
+    print()
+
+    print(
+        "Your gesture_model.pkl still contains UNKNOWN."
+    )
+
+    print(
+        "Retrain the model using only the 10 gestures."
+    )
+
+    print()
+
+    raise RuntimeError(
+        "UNKNOWN is present in gesture_model.pkl. "
+        "Retrain the model without UNKNOWN."
+    )
 
 
-missing_classes = [
+# =========================================================
+# CHECK REQUIRED CLASSES
+# =========================================================
+
+missing_gestures = [
 
     gesture
 
     for gesture in GESTURES
 
-    if gesture not in model_class_names
+    if gesture not in MODEL_CLASSES
 
 ]
 
 
-if missing_classes:
+if missing_gestures:
 
     print(
-        "WARNING: Missing gesture classes:"
+        "Missing gesture classes:"
     )
 
-    for gesture in missing_classes:
+    for gesture in missing_gestures:
 
         print(
             " -",
             gesture
         )
 
-    print()
-
-
-# =========================================================
-# MEDIAPIPE SETUP
-# =========================================================
-
-BaseOptions = (
-    mp.tasks.BaseOptions
-)
-
-HandLandmarker = (
-    mp.tasks.vision.HandLandmarker
-)
-
-HandLandmarkerOptions = (
-    mp.tasks.vision.HandLandmarkerOptions
-)
-
-VisionRunningMode = (
-    mp.tasks.vision.RunningMode
-)
-
-
-# =========================================================
-# LANDMARKER OPTIONS
-# =========================================================
-
-options = HandLandmarkerOptions(
-
-    base_options=BaseOptions(
-
-        model_asset_path=HAND_MODEL_FILE
-
-    ),
-
-    running_mode=(
-        VisionRunningMode.IMAGE
-    ),
-
-    num_hands=1,
-
-    min_hand_detection_confidence=0.5,
-
-    min_hand_presence_confidence=0.5,
-
-    min_tracking_confidence=0.5
-
-)
-
-
-# =========================================================
-# CREATE LANDMARKER
-# =========================================================
-
-try:
-
-    landmarker = (
-        HandLandmarker.create_from_options(
-            options
-        )
+    raise RuntimeError(
+        "gesture_model.pkl does not contain all 10 "
+        "required gesture classes."
     )
-
-except Exception as e:
-
-    print()
-    print("=" * 60)
-    print("ERROR: COULD NOT LOAD MEDIAPIPE MODEL")
-    print("=" * 60)
-    print()
-    print(
-        "Make sure this file exists:"
-    )
-    print(
-        HAND_MODEL_FILE
-    )
-    print()
-    print(
-        "Error:",
-        e
-    )
-    print()
-
-    raise SystemExit(1)
-
-
-# =========================================================
-# THREAD LOCK
-# =========================================================
-
-# Prevent multiple requests from using the same
-# MediaPipe landmarker simultaneously.
-
-landmarker_lock = threading.Lock()
 
 
 # =========================================================
@@ -253,9 +190,13 @@ def health():
 
         "status": "ok",
 
-        "model_loaded": True,
+        "model": "loaded",
 
-        "mediapipe_loaded": True,
+        "confidence_threshold":
+            CONFIDENCE_THRESHOLD,
+
+        "margin_threshold":
+            MARGIN_THRESHOLD,
 
         "gestures": GESTURES
 
@@ -263,7 +204,7 @@ def health():
 
 
 # =========================================================
-# PREDICT API
+# PREDICTION API
 # =========================================================
 
 @app.route(
@@ -283,157 +224,31 @@ def predict():
         )
 
 
-        if not data:
+        if data is None:
 
             return jsonify({
 
                 "success": False,
 
-                "error": "No JSON data received"
-
-            }), 400
-
-
-        if "image" not in data:
-
-            return jsonify({
-
-                "success": False,
-
-                "error": "No image received"
-
-            }), 400
-
-
-        image_data = data["image"]
-
-
-        if not image_data:
-
-            return jsonify({
-
-                "success": False,
-
-                "error": "Image is empty"
+                "error": "No JSON data received."
 
             }), 400
 
 
         # =================================================
-        # REMOVE DATA URL PREFIX
+        # GET LANDMARKS
         # =================================================
 
-        if "," in image_data:
-
-            image_data = image_data.split(
-                ",",
-                1
-            )[1]
-
-
-        # =================================================
-        # DECODE BASE64
-        # =================================================
-
-        try:
-
-            image_bytes = base64.b64decode(
-                image_data,
-                validate=True
-            )
-
-        except Exception:
-
-            return jsonify({
-
-                "success": False,
-
-                "error": "Invalid Base64 image"
-
-            }), 400
-
-
-        # =================================================
-        # CONVERT TO NUMPY
-        # =================================================
-
-        image_array = np.frombuffer(
-
-            image_bytes,
-
-            dtype=np.uint8
-
+        landmarks = data.get(
+            "landmarks"
         )
 
 
-        # =================================================
-        # DECODE IMAGE
-        # =================================================
+        # -------------------------------------------------
+        # NO LANDMARKS
+        # -------------------------------------------------
 
-        frame = cv2.imdecode(
-
-            image_array,
-
-            cv2.IMREAD_COLOR
-
-        )
-
-
-        if frame is None:
-
-            return jsonify({
-
-                "success": False,
-
-                "error": "Could not decode image"
-
-            }), 400
-
-
-        # =================================================
-        # BGR -> RGB
-        # =================================================
-
-        rgb_frame = cv2.cvtColor(
-
-            frame,
-
-            cv2.COLOR_BGR2RGB
-
-        )
-
-
-        # =================================================
-        # CREATE MEDIAPIPE IMAGE
-        # =================================================
-
-        mp_image = mp.Image(
-
-            image_format=(
-                mp.ImageFormat.SRGB
-            ),
-
-            data=rgb_frame
-
-        )
-
-
-        # =================================================
-        # MEDIAPIPE HAND DETECTION
-        # =================================================
-
-        with landmarker_lock:
-
-            result = landmarker.detect(
-                mp_image
-            )
-
-
-        # =================================================
-        # NO HAND
-        # =================================================
-
-        if not result.hand_landmarks:
+        if not landmarks:
 
             return jsonify({
 
@@ -445,42 +260,131 @@ def predict():
 
                 "margin": 0.0,
 
-                "landmarks": []
+                "accepted": False
 
             })
 
 
         # =================================================
-        # GET FIRST HAND
+        # CHECK 21 LANDMARKS
         # =================================================
 
-        hand = result.hand_landmarks[0]
+        if not isinstance(
+            landmarks,
+            list
+        ):
+
+            return jsonify({
+
+                "success": False,
+
+                "error": (
+                    "Landmarks must be a list."
+                )
+
+            }), 400
+
+
+        if len(landmarks) != 21:
+
+            return jsonify({
+
+                "success": False,
+
+                "error": (
+                    "Expected 21 landmarks, "
+                    f"received {len(landmarks)}."
+                )
+
+            }), 400
 
 
         # =================================================
-        # EXTRACT 63 FEATURES
+        # CREATE 63 FEATURES
         # =================================================
 
         features = []
 
 
-        for landmark in hand:
+        for index, point in enumerate(
+            landmarks
+        ):
 
-            features.append(
-                float(landmark.x)
-            )
+            if not isinstance(
+                point,
+                dict
+            ):
 
-            features.append(
-                float(landmark.y)
-            )
+                return jsonify({
 
-            features.append(
-                float(landmark.z)
-            )
+                    "success": False,
+
+                    "error": (
+                        f"Landmark {index} "
+                        "is invalid."
+                    )
+
+                }), 400
+
+
+            if (
+                "x" not in point
+                or "y" not in point
+                or "z" not in point
+            ):
+
+                return jsonify({
+
+                    "success": False,
+
+                    "error": (
+                        f"Landmark {index} "
+                        "must contain x, y and z."
+                    )
+
+                }), 400
+
+
+            try:
+
+                x = float(
+                    point["x"]
+                )
+
+                y = float(
+                    point["y"]
+                )
+
+                z = float(
+                    point["z"]
+                )
+
+            except (
+                TypeError,
+                ValueError
+            ):
+
+                return jsonify({
+
+                    "success": False,
+
+                    "error": (
+                        f"Landmark {index} "
+                        "contains invalid values."
+                    )
+
+                }), 400
+
+
+            features.append(x)
+
+            features.append(y)
+
+            features.append(z)
 
 
         # =================================================
-        # VALIDATE FEATURE COUNT
+        # CHECK FEATURE COUNT
         # =================================================
 
         if len(features) != 63:
@@ -490,18 +394,17 @@ def predict():
                 "success": False,
 
                 "error": (
-                    "Expected 63 hand features, "
-                    f"got {len(features)}"
+                    "Expected 63 features."
                 )
 
-            }), 500
+            }), 400
 
 
         # =================================================
-        # NUMPY FEATURE ARRAY
+        # NUMPY ARRAY
         # =================================================
 
-        features = np.array(
+        X = np.asarray(
 
             features,
 
@@ -510,7 +413,8 @@ def predict():
         ).reshape(
 
             1,
-            -1
+
+            63
 
         )
 
@@ -520,166 +424,78 @@ def predict():
         # =================================================
 
         probabilities = model.predict_proba(
-
-            features
-
+            X
         )[0]
 
 
         # =================================================
-        # REMOVE UNKNOWN FROM CONSIDERATION
-        # =================================================
-
-        # Even if an old model file still contains
-        # UNKNOWN, it will never be displayed.
-
-        valid_indices = [
-
-            index
-
-            for index, class_name
-            in enumerate(model_class_names)
-
-            if class_name in GESTURES
-
-        ]
-
-
-        if not valid_indices:
-
-            return jsonify({
-
-                "success": False,
-
-                "error": (
-                    "Model does not contain any "
-                    "of the 10 supported gestures."
-                )
-
-            }), 500
-
-
-        # =================================================
-        # FILTER TO 10 SUPPORTED CLASSES
-        # =================================================
-
-        valid_probabilities = np.array(
-
-            [
-                probabilities[index]
-                for index in valid_indices
-            ],
-
-            dtype=np.float32
-
-        )
-
-
-        valid_class_names = [
-
-            model_class_names[index]
-
-            for index in valid_indices
-
-        ]
-
-
-        # =================================================
-        # RENORMALIZE
-        # =================================================
-
-        probability_sum = (
-            valid_probabilities.sum()
-        )
-
-
-        if probability_sum > 0:
-
-            valid_probabilities /= (
-                probability_sum
-            )
-
-
-        # =================================================
-        # SORT PREDICTIONS
+        # TOP TWO CLASSES
         # =================================================
 
         sorted_indices = np.argsort(
-
-            valid_probabilities
-
+            probabilities
         )[::-1]
 
 
-        # =================================================
-        # TOP PREDICTION
-        # =================================================
-
-        best_position = int(
-
+        best_index = int(
             sorted_indices[0]
-
         )
 
-
-        prediction = (
-
-            valid_class_names[
-                best_position
-            ]
-
-        )
-
-
-        best_probability = float(
-
-            valid_probabilities[
-                best_position
-            ]
-
-        )
-
-
-        # =================================================
-        # SECOND PREDICTION
-        # =================================================
 
         if len(sorted_indices) > 1:
 
-            second_position = int(
-
+            second_index = int(
                 sorted_indices[1]
-
-            )
-
-
-            second_probability = float(
-
-                valid_probabilities[
-                    second_position
-                ]
-
             )
 
         else:
 
-            second_probability = 0.0
+            second_index = best_index
 
 
         # =================================================
-        # PERCENTAGES
+        # PREDICTION
         # =================================================
 
-        confidence = (
+        prediction = str(
 
-            best_probability * 100.0
+            model.classes_[
+                best_index
+            ]
 
         )
 
 
+        # =================================================
+        # CONFIDENCE
+        # =================================================
+
+        confidence = (
+
+            float(
+                probabilities[
+                    best_index
+                ]
+            )
+
+            * 100.0
+
+        )
+
+
+        # =================================================
+        # SECOND CONFIDENCE
+        # =================================================
+
         second_confidence = (
 
-            second_probability * 100.0
+            float(
+                probabilities[
+                    second_index
+                ]
+            )
+
+            * 100.0
 
         )
 
@@ -697,20 +513,24 @@ def predict():
 
 
         # =================================================
-        # CONFIDENCE CHECK
+        # ACCEPTANCE
         # =================================================
 
         accepted = True
 
+
+        # -------------------------------------------------
+        # CONFIDENCE < 55%
+        # -------------------------------------------------
 
         if confidence < CONFIDENCE_THRESHOLD:
 
             accepted = False
 
 
-        # =================================================
-        # MARGIN CHECK
-        # =================================================
+        # -------------------------------------------------
+        # TOP TWO TOO CLOSE
+        # -------------------------------------------------
 
         if margin < MARGIN_THRESHOLD:
 
@@ -723,64 +543,66 @@ def predict():
 
         if not accepted:
 
-            prediction = "UNCERTAIN"
+            display_prediction = (
+                "UNCERTAIN"
+            )
+
+        else:
+
+            display_prediction = (
+                prediction
+            )
 
 
         # =================================================
-        # LANDMARK DATA FOR FRONTEND
-        # =================================================
-
-        landmarks = []
-
-
-        for landmark in hand:
-
-            landmarks.append({
-
-                "x": float(
-                    landmark.x
-                ),
-
-                "y": float(
-                    landmark.y
-                ),
-
-                "z": float(
-                    landmark.z
-                )
-
-            })
-
-
-        # =================================================
-        # RETURN RESULT
+        # RETURN JSON
         # =================================================
 
         return jsonify({
 
             "success": True,
 
-            "gesture": prediction,
+            "gesture":
+                display_prediction,
 
-            "confidence": round(
-                confidence,
-                2
-            ),
+            "confidence":
+                round(
+                    confidence,
+                    2
+                ),
 
-            "margin": round(
-                margin,
-                2
-            ),
+            "margin":
+                round(
+                    margin,
+                    2
+                ),
 
-            "accepted": accepted,
-
-            "landmarks": landmarks
+            "accepted":
+                accepted
 
         })
 
 
     # =====================================================
-    # BASE64 / REQUEST ERROR
+    # INVALID DATA
+    # =====================================================
+
+    except ValueError as e:
+
+        return jsonify({
+
+            "success": False,
+
+            "error": (
+                "Invalid landmark data: "
+                + str(e)
+            )
+
+        }), 400
+
+
+    # =====================================================
+    # SERVER ERROR
     # =====================================================
 
     except Exception as e:
@@ -813,28 +635,9 @@ def request_too_large(error):
 
         "success": False,
 
-        "error": "Image request is too large"
+        "error": "Request is too large."
 
     }), 413
-
-
-# =========================================================
-# SERVER SHUTDOWN
-# =========================================================
-
-@app.route(
-    "/shutdown",
-    methods=["POST"]
-)
-def shutdown():
-
-    return jsonify({
-
-        "success": False,
-
-        "error": "Shutdown disabled"
-
-    }), 403
 
 
 # =========================================================
@@ -843,9 +646,8 @@ def shutdown():
 
 if __name__ == "__main__":
 
-    # -----------------------------------------------------
-    # PORT
-    # -----------------------------------------------------
+    # Render provides PORT.
+    # Local development defaults to 5000.
 
     port = int(
 
@@ -859,7 +661,7 @@ if __name__ == "__main__":
 
     print()
     print("=" * 60)
-    print("          HAND GESTURE TO WORDS")
+    print("        HAND GESTURE TO WORDS")
     print("=" * 60)
     print()
 
@@ -877,31 +679,28 @@ if __name__ == "__main__":
     print()
 
     print(
-        f"Confidence threshold: "
+        "Confidence threshold:",
         f"{CONFIDENCE_THRESHOLD}%"
     )
 
     print(
-        f"Margin threshold: "
+        "Margin threshold:",
         f"{MARGIN_THRESHOLD}%"
     )
 
     print(
-        f"Port: {port}"
+        "Hold time:",
+        "0.3 seconds"
     )
 
     print()
 
     print(
-        "Starting Flask server..."
+        f"Starting server on port {port}..."
     )
 
     print()
 
-
-    # -----------------------------------------------------
-    # IMPORTANT FOR PUBLIC DEPLOYMENT
-    # -----------------------------------------------------
 
     app.run(
 
